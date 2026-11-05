@@ -1,5 +1,4 @@
 // Serverless AI proxy (Vercel function; also served by Vite in dev). Holds GEMINI_API_KEY server-side.
-const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash'
 const hits = new Map()
 
 const PROMPTS = {
@@ -12,6 +11,7 @@ export default async function handler(req, res) {
   const send = (code, obj) => { res.statusCode = code; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(obj)) }
   if (req.method !== 'POST') return send(405, { error: 'Method not allowed.' })
   const key = process.env.GEMINI_API_KEY
+  const MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite'
   if (!key) return send(500, { error: 'AI is not configured yet. Add GEMINI_API_KEY to your .env file (see README).' })
 
   const ip = String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'local').split(',')[0]
@@ -42,10 +42,14 @@ export default async function handler(req, res) {
       r = await request()
     }
     if (!r.ok) {
-      if (r.status === 429) return send(429, { error: 'The AI free-tier limit was reached. Wait a minute and try again.' })
-      if (r.status === 400 || r.status === 403) return send(502, { error: 'The AI provider rejected the request. Check that GEMINI_API_KEY is valid.' })
-      if (r.status === 503 || r.status === 500) return send(503, { error: "Google's AI service is busy right now. Please try again in a minute." })
-      return send(502, { error: `The AI provider returned an error (${r.status}). Try again shortly.` })
+      const detail = await r.json().then((j) => j.error?.message || '').catch(() => '')
+      console.error('[Gemini]', r.status, detail)
+      const extra = ` (model used: ${MODEL})` + (detail ? ` Google says: ${detail.slice(0, 220)}` : '')
+      if (r.status === 429) return send(429, { error: 'Rate or quota limit reached for this model.' + extra })
+      if (r.status === 400 || r.status === 403) return send(502, { error: 'Google rejected the request (check the API key).' + extra })
+      if (r.status === 404) return send(502, { error: 'Model not found. Change GEMINI_MODEL in .env.' + extra })
+      if (r.status === 503 || r.status === 500) return send(503, { error: "Google's AI service is busy. Try again in a minute." + extra })
+      return send(502, { error: `The AI provider returned an error (${r.status}).` + extra })
     }
     const out = await r.json()
     const text = (out.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('').trim()
